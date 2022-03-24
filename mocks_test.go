@@ -94,10 +94,6 @@ type pod = struct {
 	keeper *tokensync.TokenKeeper
 }
 
-var (
-	repoLock sync.Mutex
-)
-
 type fakeRepo struct {
 	dataStore *storage
 	lag   time.Duration
@@ -122,8 +118,8 @@ func (r *fakeRepo) StoreToken(_ context.Context, token tokensync.Token) error {
 	return nil
 }
 
-func (r *fakeRepo) Lock()   { r.sleep(); repoLock.Lock() }
-func (r *fakeRepo) UnLock() { r.sleep(); repoLock.Unlock() }
+func (r *fakeRepo) Lock()   { r.sleep(); r.storage().Lock() }
+func (r *fakeRepo) Unlock() { r.sleep(); r.storage().Unlock() }
 
 func (r *fakeRepo) storage() *storage {
 	if r.dataStore == nil {
@@ -154,4 +150,8 @@ func (r *fakeRepo) token() *fakeToken {
 
 type storage struct {
 	token *fakeToken
+	lock sync.Mutex
 }
+
+func (s *storage) Lock() { s.lock.Lock() }
+func (s *storage) Unlock() { s.lock.Unlock() }

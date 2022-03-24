@@ -200,7 +200,7 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 		// store the token in repo with lag after the keeper has requested it
 		require.NoError(t, repo.StoreToken(ctx, token))
 		// unlock the repo, this should now allow the keeper.Token() call to get this token
-		repo.UnLock()
+		repo.Unlock()
 		wg.Wait()
 
 		// assert token not fetched from client and that the fetchedToken is correct
@@ -260,22 +260,22 @@ func TestTokenKeeper_multiProcess(t *testing.T) {
 	// this means each pod needs the current token and must avoid race conditions over many processes which
 	// do not share memory...
 
-	// FIXME: implement and remove skip
-	// t.Skip() // not yet implemented
-
 	// 20ms is enough to prove this, but manually change to 2000 to check it if you want
 	var lag = 20 * time.Millisecond
 
 	var processCount = 4 // 4 pods in cluster
+
+	var dataStore = new(storage)
 
 	// init the pods with their own client and keeper
 	var pods = make([]*pod, processCount)
 	for i := range pods {
 		client := &fakeClient{}
 		client.lag = lag
+		repo := new(fakeRepo).withLag(lag).withStorage(dataStore)
 		pods[i] = &pod{
 			client: client,
-			keeper: tokensync.NewTokenKeeper(client),
+			keeper: tokensync.NewTokenKeeper(client).WithRepo(repo),
 		}
 	}
 
