@@ -1,4 +1,4 @@
-package tokensync
+package tk
 
 import (
 	"context"
@@ -76,7 +76,7 @@ func (k *TokenKeeper) Token() Token {
 		}
 		k.token = t
 	}
-	if err := k.validateToken(); err != nil {
+	if err := k.validateToken(k.token); err != nil {
 		k.logger.WithField("token", k.token).
 			WithError(err).Warn("token invalid")
 		tok, err := k.client.RefreshToken(k.ctx, k.token)
@@ -91,17 +91,25 @@ func (k *TokenKeeper) Token() Token {
 	return k.token
 }
 
+// getToken is called only when k.token is nil
 func (k *TokenKeeper) getToken() (Token, error) {
 	if t := k.tokenFromRepo(); t != nil {
 		return t, nil
 	}
 
 	if k.repo != nil {
+		// multi pod lock to prevent each pod from calling client.NewToken()
 		k.repo.Lock()
 		defer k.repo.UnLock()
 
-		if err := k.validateToken(); err != nil {
+		// did another thread in this runtime already update the token?
+		if k.token != nil {
 			return k.token, nil
+		}
+
+		// did another k8s pod already update the token in the repo?
+		if t, err := k.repo.GetToken(k.ctx); err == nil {
+			return t, nil
 		}
 	}
 
@@ -122,6 +130,8 @@ func (k *TokenKeeper) tokenFromRepo() Token {
 	if k.repo == nil {
 		return nil
 	}
+	k.repo.Lock()
+	defer k.repo.UnLock()
 	t, err := k.repo.GetToken(k.ctx)
 	if err != nil {
 		return nil
@@ -143,14 +153,14 @@ func (k *TokenKeeper) tokenFromClient() (Token, error) {
 	return t, nil
 }
 
-func (k *TokenKeeper) validateToken() error {
-	if k.token == nil {
+func (k *TokenKeeper) validateToken(t Token) error {
+	if t == nil {
 		return errors.New("no token set")
 	}
-	if err := k.token.Validate(); err != nil {
+	if err := t.Validate(); err != nil {
 		return err
 	}
-	if k.token.Expires().Before(time.Now()) {
+	if t.Expires().Before(time.Now()) {
 		return errors.New("token is expired")
 	}
 	return nil

@@ -1,4 +1,4 @@
-module github.com/tempcke/tokensync
+module github.com/tempcke/tk
 
 go 1.17
 

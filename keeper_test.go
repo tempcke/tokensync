@@ -1,4 +1,4 @@
-package tokensync_test
+package tk_test
 
 import (
 	"context"
@@ -10,12 +10,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tempcke/tokensync"
+
+	tokensync "github.com/tempcke/tk"
 )
 
-func TestTokenKeeper(t *testing.T) {
+var ctx = context.Background()
 
+func TestTokenKeeper(t *testing.T) {
 	client := &fakeClient{}
+
 	t.Run("should return same token each time", func(t *testing.T) {
 		keeper := tokensync.NewTokenKeeper(client)
 		tok := keeper.Token()
@@ -63,7 +66,7 @@ func TestTokenKeeper_concurrent(t *testing.T) {
 		keeper := tokensync.NewTokenKeeper(client)
 
 		var wg sync.WaitGroup
-		var tokens = make([]tokensync.Token, numCalls, numCalls)
+		var tokens = make([]tokensync.Token, numCalls)
 		for i := 0; i < numCalls; i++ {
 			wg.Add(1)
 			go func(i int) {
@@ -91,7 +94,7 @@ func TestTokenKeeper_concurrent(t *testing.T) {
 		client.lag = lag // slow it down
 
 		var wg sync.WaitGroup
-		var tokens = make([]tokensync.Token, numCalls, numCalls)
+		var tokens = make([]tokensync.Token, numCalls)
 		for i := 0; i < numCalls; i++ {
 			wg.Add(1)
 			go func(i int) {
@@ -120,11 +123,11 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 		// it should check the repo for a valid token
 
 		repo := &fakeRepo{}
-		repo.token = newFakeToken()
+		_ = repo.StoreToken(ctx, newFakeToken())
 
 		client := &fakeClient{}
 		keeper := tokensync.NewTokenKeeper(client).WithRepo(repo)
-		assert.Equal(t, repo.token.String(), keeper.Token().String())
+		assert.Equal(t, repo.token().String(), keeper.Token().String())
 		assert.Equal(t, 0, client.reqCount)
 	})
 
@@ -135,8 +138,9 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 			keeper = tokensync.NewTokenKeeper(client).WithRepo(repo)
 		)
 		tok := keeper.Token() // new token from client
+		require.NotNil(t, tok)
 		require.NotNil(t, repo.token)
-		assert.Equal(t, tok.String(), repo.token.String())
+		assert.Equal(t, tok.String(), repo.token().String())
 	})
 
 	t.Run("repo token is expired", func(t *testing.T) {
@@ -146,7 +150,7 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 		origRepoToken := newFakeToken()
 		origRepoToken.expireToken()
 		repo := &fakeRepo{}
-		_ = repo.StoreToken(nil, origRepoToken)
+		_ = repo.StoreToken(ctx, origRepoToken)
 
 		client := &fakeClient{}
 		keeper := tokensync.NewTokenKeeper(client).WithRepo(repo)
@@ -157,7 +161,7 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 		assert.NotEqual(t, origRepoToken.String(), fetchedToken.String())
 
 		// assert new token from client stored into repo
-		assert.Equal(t, repo.token.String(), fetchedToken.String())
+		assert.Equal(t, repo.token().String(), fetchedToken.String())
 		require.NoError(t, fetchedToken.Validate())
 	})
 
@@ -204,7 +208,7 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 		require.Equal(t, token.String(), fetchedToken.String())
 
 		// assert repo token was not changed
-		require.Equal(t, token.String(), repo.token.String())
+		require.Equal(t, token.String(), repo.token().String())
 	})
 
 	t.Run("two processes startup at the same time", func(t *testing.T) {
@@ -215,11 +219,13 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 		var (
 			lag = 50 * time.Millisecond
 
+			dataStore = new(storage)
+
 			client1 = new(fakeClient).withLag(lag)
 			client2 = new(fakeClient).withLag(lag)
 
-			repo1 = new(fakeRepo).withLag(lag)
-			repo2 = new(fakeRepo).withLag(lag)
+			repo1 = new(fakeRepo).withLag(lag).withStorage(dataStore)
+			repo2 = new(fakeRepo).withLag(lag).withStorage(dataStore)
 
 			keeper1 = tokensync.NewTokenKeeper(client1).WithRepo(repo1)
 			keeper2 = tokensync.NewTokenKeeper(client2).WithRepo(repo2)
@@ -238,17 +244,14 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 		}()
 		wg.Wait()
 
-		// only 1 request for a token should be made total
-		assert.Equal(t, 1, client1.reqCount+client2.reqCount)
-
 		// both keepers should have the same token
 		require.Equal(t, keeper1.Token().String(), keeper2.Token().String())
 
-		// both repos should have the same token
-		require.Equal(t, repo1.token.String(), repo2.token.String())
-
 		// repo token and keeper token should match
-		require.Equal(t, keeper1.Token().String(), repo1.token.String())
+		require.Equal(t, keeper1.Token().String(), repo1.token().String())
+
+		// only 1 request for a token should be made total
+		assert.Equal(t, 1, client1.reqCount+client2.reqCount)
 	})
 }
 
@@ -258,7 +261,7 @@ func TestTokenKeeper_multiProcess(t *testing.T) {
 	// do not share memory...
 
 	// FIXME: implement and remove skip
-	t.Skip() // not yet implemented
+	// t.Skip() // not yet implemented
 
 	// 20ms is enough to prove this, but manually change to 2000 to check it if you want
 	var lag = 20 * time.Millisecond
