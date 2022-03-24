@@ -38,7 +38,7 @@ func TestTokenKeeper(t *testing.T) {
 	t.Run("should refresh token when token not valid", func(t *testing.T) {
 		keeper := tokensync.NewTokenKeeper(client)
 		tokA := keeper.Token() // valid token
-		client.expireToken()
+		client.curToken.err = errors.New("anything " + uuid.NewString())
 
 		tokB := keeper.Token()
 		assert.NotEqual(t, tokA, tokB)
@@ -109,6 +109,149 @@ func TestTokenKeeper_concurrent(t *testing.T) {
 	})
 }
 
+func TestTokenKeeper_SharedToken(t *testing.T) {
+	// suppose we have an external api which when you request a new token it makes all others for you invalid
+	// if we have 2 instances of our app running and both need to use that api then they
+	// will need to share the same access token
+	// to accomplish this the token needs to exist in a shared location such as postgres or redis or... etc
+
+	t.Run("get token from repo", func(t *testing.T) {
+		// when the keeper doesn't have a token, before telling the client to make a new one
+		// it should check the repo for a valid token
+
+		repo := &fakeRepo{}
+		repo.token = newFakeToken()
+
+		client := &fakeClient{}
+		keeper := tokensync.NewTokenKeeper(client).WithRepo(repo)
+		assert.Equal(t, repo.token.String(), keeper.Token().String())
+		assert.Equal(t, 0, client.reqCount)
+	})
+
+	t.Run("keeper stores new tokens into repo", func(t *testing.T) {
+		var (
+			repo   = new(fakeRepo)
+			client = new(fakeClient)
+			keeper = tokensync.NewTokenKeeper(client).WithRepo(repo)
+		)
+		tok := keeper.Token() // new token from client
+		require.NotNil(t, repo.token)
+		assert.Equal(t, tok.String(), repo.token.String())
+	})
+
+	t.Run("repo token is expired", func(t *testing.T) {
+		// if the repo token is expired or invalid then keeper should
+		// get a new token from the client, then update the repo with new token
+
+		origRepoToken := newFakeToken()
+		origRepoToken.expireToken()
+		repo := &fakeRepo{}
+		_ = repo.StoreToken(nil, origRepoToken)
+
+		client := &fakeClient{}
+		keeper := tokensync.NewTokenKeeper(client).WithRepo(repo)
+
+		fetchedToken := keeper.Token()
+
+		// assert we didn't get the expired token
+		assert.NotEqual(t, origRepoToken.String(), fetchedToken.String())
+
+		// assert new token from client stored into repo
+		assert.Equal(t, repo.token.String(), fetchedToken.String())
+		require.NoError(t, fetchedToken.Validate())
+	})
+
+	t.Run("repo lock blocks keeper until token ready", func(t *testing.T) {
+		// suppose we deploy the app in 2 pods
+		// neither will have a token, but will need one, and they do not share memory
+		// only ONE may fetch a token from the client...
+
+		var (
+			ctx    = context.Background()
+			lag    = 50 * time.Millisecond
+			client = new(fakeClient).withLag(lag)
+			repo   = new(fakeRepo).withLag(lag)
+			token  = newFakeToken()
+
+			fetchedToken tokensync.Token
+			wg           sync.WaitGroup
+		)
+
+		// lock the repo as though another process is updating the token
+		repo.Lock()
+
+		keeper := tokensync.NewTokenKeeper(client).WithRepo(repo)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fetchedToken = keeper.Token()
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fetchedToken = keeper.Token()
+		}()
+
+		// store the token in repo with lag after the keeper has requested it
+		require.NoError(t, repo.StoreToken(ctx, token))
+		// unlock the repo, this should now allow the keeper.Token() call to get this token
+		repo.UnLock()
+		wg.Wait()
+
+		// assert token not fetched from client and that the fetchedToken is correct
+		require.Equal(t, 0, client.reqCount)
+		require.Equal(t, token.String(), fetchedToken.String())
+
+		// assert repo token was not changed
+		require.Equal(t, token.String(), repo.token.String())
+	})
+
+	t.Run("two processes startup at the same time", func(t *testing.T) {
+		// suppose we deploy the app in 2 pods
+		// neither will have a token, but will need one, and they do not share memory
+		// only ONE may fetch a token from the client...
+
+		var (
+			lag = 50 * time.Millisecond
+
+			client1 = new(fakeClient).withLag(lag)
+			client2 = new(fakeClient).withLag(lag)
+
+			repo1 = new(fakeRepo).withLag(lag)
+			repo2 = new(fakeRepo).withLag(lag)
+
+			keeper1 = tokensync.NewTokenKeeper(client1).WithRepo(repo1)
+			keeper2 = tokensync.NewTokenKeeper(client2).WithRepo(repo2)
+
+			wg sync.WaitGroup
+		)
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = keeper1.Token()
+		}()
+		go func() {
+			defer wg.Done()
+			_ = keeper2.Token()
+		}()
+		wg.Wait()
+
+		// only 1 request for a token should be made total
+		assert.Equal(t, 1, client1.reqCount+client2.reqCount)
+
+		// both keepers should have the same token
+		require.Equal(t, keeper1.Token().String(), keeper2.Token().String())
+
+		// both repos should have the same token
+		require.Equal(t, repo1.token.String(), repo2.token.String())
+
+		// repo token and keeper token should match
+		require.Equal(t, keeper1.Token().String(), repo1.token.String())
+	})
+}
+
 func TestTokenKeeper_multiProcess(t *testing.T) {
 	// now suppose you have 4 pods running and each time you get a token the service invalidates the previous
 	// this means each pod needs the current token and must avoid race conditions over many processes which
@@ -122,8 +265,9 @@ func TestTokenKeeper_multiProcess(t *testing.T) {
 
 	var processCount = 4 // 4 pods in cluster
 
-	var pods = make(cluster, processCount)
-	for i, _ := range pods {
+	// init the pods with their own client and keeper
+	var pods = make([]*pod, processCount)
+	for i := range pods {
 		client := &fakeClient{}
 		client.lag = lag
 		pods[i] = &pod{
@@ -132,8 +276,19 @@ func TestTokenKeeper_multiProcess(t *testing.T) {
 		}
 	}
 
-	// require all tokens equal by asserting that all tokens equal the first
-	tokens := pods.Token()
+	// get a token from each pod at the same time
+	var wg sync.WaitGroup
+	tokens := make([]tokensync.Token, len(pods))
+	for i, p := range pods {
+		wg.Add(1)
+		go func(i int, p *pod) {
+			defer wg.Done()
+			tokens[i] = p.keeper.Token()
+		}(i, p)
+	}
+	wg.Wait()
+
+	// assert all tokens from each pod match
 	for i := 1; i < len(tokens); i++ {
 		require.Equal(t, tokens[0].String(), tokens[i].String())
 	}
@@ -171,96 +326,4 @@ func TestTokenKeeper_errors(t *testing.T) {
 		assert.ErrorIs(t, tokB.Validate(), tokensync.ErrClientRefreshTokenFailed)
 		assert.ErrorContains(t, tokB.Validate(), client.err.Error())
 	})
-}
-
-type fakeClient struct {
-	err      error
-	curToken *fakeToken
-	lag      time.Duration
-	reqCount int
-}
-
-func (c *fakeClient) NewToken(_ context.Context) (tokensync.Token, error) {
-	if c.err != nil {
-		return nil, c.err
-	}
-	c.sleep()
-	return c.newFakeToken(), nil
-}
-
-func (c *fakeClient) RefreshToken(_ context.Context, _ tokensync.Token) (tokensync.Token, error) {
-	if c.err != nil {
-		return nil, c.err
-	}
-	c.sleep()
-	return c.newFakeToken(), nil
-}
-
-func (c *fakeClient) sleep() {
-	c.reqCount++
-	if c.lag > 0 {
-		time.Sleep(c.lag)
-	}
-}
-
-func (c *fakeClient) newFakeToken() *fakeToken {
-	c.curToken = newFakeToken()
-	return c.curToken
-}
-
-func (c *fakeClient) expireToken() {
-	c.curToken.expires = time.Now().Add(-2 * time.Minute)
-}
-
-type fakeToken struct {
-	val     string
-	created time.Time
-	expires time.Time
-	err     error
-}
-
-func newFakeToken() *fakeToken {
-	return &fakeToken{
-		val:     uuid.NewString(),
-		created: time.Now(),
-		expires: time.Now().Add(time.Minute),
-	}
-}
-
-func (t fakeToken) String() string {
-	return t.val
-}
-
-func (t fakeToken) Created() time.Time {
-	return t.created
-}
-
-func (t fakeToken) Expires() time.Time {
-	return t.expires
-}
-
-func (t fakeToken) Validate() error {
-	return t.err
-}
-
-type pod = struct {
-	client *fakeClient
-	keeper tokensync.TokenKeeper
-}
-type cluster []*pod
-
-// Token has every pod in the cluster get a token all at the same time
-func (c cluster) Token() []tokensync.Token {
-	// have ever pod request a new token all at the same time, and expect them all to be equal
-	var wg sync.WaitGroup
-	tokens := make([]tokensync.Token, len(c))
-	for i, p := range c {
-		wg.Add(1)
-		go func(i int, p *pod) {
-			defer wg.Done()
-			tokens[i] = p.keeper.Token()
-		}(i, p)
-	}
-	wg.Wait()
-	return tokens
 }
