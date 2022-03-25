@@ -256,6 +256,11 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 }
 
 func TestTokenKeeper_multiProcess(t *testing.T) {
+	type pod = struct {
+		client *fakeClient
+		keeper *tokensync.TokenKeeper
+	}
+
 	// now suppose you have 4 pods running and each time you get a token the service invalidates the previous
 	// this means each pod needs the current token and must avoid race conditions over many processes which
 	// do not share memory...
@@ -329,4 +334,13 @@ func TestTokenKeeper_errors(t *testing.T) {
 		assert.ErrorIs(t, tokB.Validate(), tokensync.ErrClientRefreshTokenFailed)
 		assert.ErrorContains(t, tokB.Validate(), client.err.Error())
 	})
+}
+
+func TestTokenKeeper_fallback(t *testing.T) {
+	// test lock TTL, what happens if a process locks the repo and then dies?
+	// the keeper should be able to realize the lock is held for to long and take over
+
+	// test keep-alive, rather than waiting until a token fails to replace it
+	// establish rules for replacing it before it expires
+	// ensure that multiple pods do not try to replace it at the same time
 }
