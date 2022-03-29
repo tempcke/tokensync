@@ -182,7 +182,7 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 		)
 
 		// lock the repo as though another process is updating the token
-		repo.Lock()
+		_ = repo.Lock(ctx)
 
 		keeper := tokensync.NewTokenKeeper(client).WithRepo(repo)
 
@@ -200,7 +200,7 @@ func TestTokenKeeper_SharedToken(t *testing.T) {
 		// store the token in repo with lag after the keeper has requested it
 		require.NoError(t, repo.StoreToken(ctx, token))
 		// unlock the repo, this should now allow the keeper.Token() call to get this token
-		repo.Unlock()
+		_ = repo.Unlock(ctx)
 		wg.Wait()
 
 		// assert token not fetched from client and that the fetchedToken is correct

@@ -16,8 +16,8 @@ type fakeToken struct {
 func newFakeToken() *fakeToken {
 	return &fakeToken{
 		val:     uuid.NewString(),
-		created: time.Now(),
-		expires: time.Now().Add(time.Minute),
+		created: time.Now().UTC(),
+		expires: time.Now().UTC().Add(time.Minute),
 	}
 }
 
@@ -38,6 +38,5 @@ func (t fakeToken) Validate() error {
 }
 
 func (t *fakeToken) expireToken() {
-	t.expires = time.Now().Add(-2 * time.Minute)
+	t.expires = time.Now().UTC().Add(-2 * time.Minute)
 }
-

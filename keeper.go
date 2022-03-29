@@ -32,8 +32,8 @@ type Client interface {
 type Repo interface {
 	GetToken(ctx context.Context) (Token, error)
 	StoreToken(ctx context.Context, token Token) error
-	Lock()
-	Unlock()
+	Lock(ctx context.Context) error
+	Unlock(ctx context.Context) error
 }
 
 type TokenKeeper struct {
@@ -99,8 +99,8 @@ func (k *TokenKeeper) getToken() (Token, error) {
 
 	if k.repo != nil {
 		// multi pod lock to prevent each pod from calling client.NewToken()
-		k.repo.Lock()
-		defer k.repo.Unlock()
+		_ = k.repo.Lock(k.ctx)
+		defer k.repo.Unlock(k.ctx)
 
 		// did another thread in this runtime already update the token?
 		if k.token != nil {
@@ -130,8 +130,8 @@ func (k *TokenKeeper) tokenFromRepo() Token {
 	if k.repo == nil {
 		return nil
 	}
-	k.repo.Lock()
-	defer k.repo.Unlock()
+	_ = k.repo.Lock(k.ctx)
+	defer k.repo.Unlock(k.ctx)
 	t, err := k.repo.GetToken(k.ctx)
 	if err != nil {
 		return nil

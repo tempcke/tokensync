@@ -11,7 +11,7 @@ import (
 
 type fakeRepo struct {
 	dataStore *storage
-	lag   time.Duration
+	lag       time.Duration
 }
 
 func (r *fakeRepo) GetToken(_ context.Context) (tokensync.Token, error) {
@@ -33,8 +33,8 @@ func (r *fakeRepo) StoreToken(_ context.Context, token tokensync.Token) error {
 	return nil
 }
 
-func (r *fakeRepo) Lock()   { r.sleep(); r.storage().Lock() }
-func (r *fakeRepo) Unlock() { r.sleep(); r.storage().Unlock() }
+func (r *fakeRepo) Lock(ctx context.Context) error   { r.sleep(); return r.storage().Lock(ctx) }
+func (r *fakeRepo) Unlock(ctx context.Context) error { r.sleep(); return r.storage().Unlock(ctx) }
 
 func (r *fakeRepo) storage() *storage {
 	if r.dataStore == nil {
@@ -65,8 +65,8 @@ func (r *fakeRepo) token() *fakeToken {
 
 type storage struct {
 	token *fakeToken
-	lock sync.Mutex
+	lock  sync.Mutex
 }
 
-func (s *storage) Lock() { s.lock.Lock() }
-func (s *storage) Unlock() { s.lock.Unlock() }
+func (s *storage) Lock(_ context.Context) error   { s.lock.Lock(); return nil }
+func (s *storage) Unlock(_ context.Context) error { s.lock.Unlock(); return nil }
